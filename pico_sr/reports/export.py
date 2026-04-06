@@ -60,6 +60,25 @@ def build_pdf_report() -> dict:
                 except Exception:
                     c.drawString(inch, y, "(Forest plot could not be embedded)")
                     y -= 0.25 * inch
+
+        # Embed LLM Meta-Analysis Text Report
+        text_rep = getattr(run, "text_report", None)
+        if text_rep:
+            try:
+                y -= 0.3 * inch
+                c.setFont("Courier", 9)
+                for line in text_rep.split("\n"):
+                    # remove some problematic characters if any
+                    clean_line = "".join([char for char in line if ord(char) < 128])
+                    c.drawString(inch, y, clean_line)
+                    y -= 0.15 * inch
+                    if y < inch:
+                        c.showPage()
+                        y = h - inch
+                        c.setFont("Courier", 9)
+            except Exception:
+                pass
+
         if diff and diff.summary_json:
             y -= 0.2 * inch
             c.setFont("Helvetica-Bold", 11)

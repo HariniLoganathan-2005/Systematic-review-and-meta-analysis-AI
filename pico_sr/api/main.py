@@ -8,7 +8,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -65,6 +65,15 @@ async def run_in_thread_llm(fn, *args, **kwargs):
                 "technical": str(e),
             },
         ) from e
+
+
+async def run_in_thread_llm_bg(fn, *args, **kwargs):
+    """Run pipeline in a background thread and handle errors silently by logging them."""
+    import logging
+    try:
+        await run_in_thread(fn, *args, **kwargs)
+    except Exception as e:
+        logging.getLogger(__name__).error("Background LLM task failed: %s", str(e))
 
 
 @asynccontextmanager
@@ -146,6 +155,12 @@ class PatchExtractionBody(BaseModel):
     hitl_pending: bool = False
 
 
+class PatchPaperBody(BaseModel):
+    screen_decision: str | None = None
+    include_for_extraction: bool | None = None
+    uncertain_review: bool | None = None
+
+
 @app.post("/search")
 async def search_endpoint(body: SearchBody):
     return await run_in_thread(
@@ -154,15 +169,24 @@ async def search_endpoint(body: SearchBody):
 
 
 @app.post("/screen")
-async def screen_endpoint(body: ScreenBody):
-    return await run_in_thread_llm(
-        run_screening, body.paper_ids, body.pico_criteria
+async def screen_endpoint(body: ScreenBody, background_tasks: BackgroundTasks):
+    background_tasks.add_task(
+        run_in_thread_llm_bg,
+        run_screening,
+        body.paper_ids,
+        body.pico_criteria
     )
+    return {"message": "Screening started in the background. Please refresh the page periodically."}
 
 
 @app.post("/extract")
-async def extract_endpoint(body: ExtractBody):
-    return await run_in_thread_llm(run_extraction, body.paper_ids)
+async def extract_endpoint(body: ExtractBody, background_tasks: BackgroundTasks):
+    background_tasks.add_task(
+        run_in_thread_llm_bg,
+        run_extraction,
+        body.paper_ids
+    )
+    return {"message": "Extraction started in the background. Check logs or UI later."}
 
 
 @app.post("/analyse")
@@ -244,6 +268,7 @@ async def list_extractions():
                     "ci_upper": pl.get("ci_upper"),
                     "population_n": pl.get("population_n"),
                     "hitl_pending": ext.hitl_pending if ext else False,
+                    "extracted": ext is not None,
                 }
             )
         return {"extractions": out}
@@ -276,6 +301,25 @@ async def list_papers():
                 for p in rows
             ]
         }
+    finally:
+        session.close()
+
+
+@app.patch("/papers/{paper_id}")
+async def patch_paper(paper_id: int, body: PatchPaperBody):
+    session = get_session()
+    try:
+        p = session.query(Paper).filter(Paper.id == paper_id).first()
+        if not p:
+            raise HTTPException(404, "Paper not found")
+        if body.screen_decision is not None:
+            p.screen_decision = body.screen_decision
+        if body.include_for_extraction is not None:
+            p.include_for_extraction = body.include_for_extraction
+        if body.uncertain_review is not None:
+            p.uncertain_review = body.uncertain_review
+        session.commit()
+        return {"ok": True}
     finally:
         session.close()
 

@@ -88,16 +88,33 @@ with tab_search:
         height=100,
     )
     if st.button("Run screening"):
-        with st.spinner("Screening with LLM (may take a while)…"):
-            r = post("/screen", {"pico_criteria": pico})
+        r = post("/screen", {"pico_criteria": pico})
         show_api_response(r)
-    if st.button("Refresh paper list"):
-        r = get("/papers")
-        if r.ok:
-            papers = r.json().get("papers", [])
+        st.toast("Screening started in the background!", icon="⏳")
+        st.success("Screening is now running in the background. The table below will update as papers are processed.")
+        
+    st.divider()
+    c1, c2 = st.columns([1, 5])
+    with c1:
+        st.button("🔄 Refresh table")
+    with c2:
+        st.caption("Latest papers in database. Click refresh to see background screening progress.")
+        
+    r = get("/papers")
+    if r.ok:
+        papers = r.json().get("papers", [])
+        if papers:
+            pending_count = sum(1 for p in papers if not p.get("screen_decision"))
+            if pending_count > 0:
+                st.info(f"⏳ **{pending_count} papers are currently pending screening.** If you started the process, it is running in the background. Refresh periodically.")
+            else:
+                st.success("✅ All papers have been screened.")
+            
             st.dataframe(pd.DataFrame(papers), use_container_width=True)
         else:
-            st.error(r.text)
+            st.info("No papers yet. Run a search to add papers to the database.")
+    else:
+        st.error(r.text)
 
 with tab_review:
     r = get("/papers")
@@ -119,6 +136,29 @@ with tab_review:
             snippet = ""
             if paper:
                 snippet = (paper.get("title") or "") + "\n\n" + (paper.get("abstract") or "")
+                
+                st.subheader(f"Screening Decision (Current: {paper.get('screen_decision')})")
+                if paper.get("screen_reason"):
+                    st.info(f"Reason: {paper.get('screen_reason')}")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("Mark as Include", key=f"include_{pid}"):
+                        requests.patch(
+                            f"{API}/papers/{pid}",
+                            json={"screen_decision": "include", "include_for_extraction": True, "uncertain_review": False},
+                            timeout=60
+                        )
+                        st.rerun()
+                with col2:
+                    if st.button("Mark as Exclude", key=f"exclude_{pid}"):
+                        requests.patch(
+                            f"{API}/papers/{pid}",
+                            json={"screen_decision": "exclude", "include_for_extraction": False, "uncertain_review": False},
+                            timeout=60
+                        )
+                        st.rerun()
+                        
             hitl_mod.render_hitl_panel(pid, snippet)
 
 with tab_extract:
@@ -132,9 +172,9 @@ with tab_extract:
 
 with tab_forest:
     if st.button("Run extraction (included papers)"):
-        with st.spinner("Extracting PICO from PDFs…"):
-            r = post("/extract", {})
+        r = post("/extract", {})
         show_api_response(r)
+        st.info("Extraction is processing in the background to avoid session timeouts. Refresh this tab later to see your new data.")
     if st.button("Run analysis"):
         with st.spinner("Pooling effects & drawing forest plot…"):
             r = post("/analyse", {})
@@ -158,7 +198,8 @@ with tab_forest:
                 st.warning("Could not display image from path")
         else:
             st.info("No analysis run yet.")
-    report_url = f"{API}/report/pdf"
+    import time
+    report_url = f"{API}/report/pdf?t={int(time.time())}"
     st.markdown(f"[Download PDF report]({report_url})")
 
 with tab_living:

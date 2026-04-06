@@ -9,7 +9,7 @@ from typing import Any
 
 import pdfplumber
 
-from pico_sr.llm_client import complete_chat
+from pico_sr.llm_client import complete_chat, LLMTransportError
 from pico_sr.db.models import Extraction, Paper, get_session, init_db
 from pico_sr.pipeline.validate import validate_extraction_payload
 
@@ -255,8 +255,22 @@ def _parse_json_loose(text: str) -> dict[str, Any]:
 
 def extract_with_llm(text: str) -> dict[str, Any]:
     """Send text to LLM and parse the PICO extraction."""
-    prompt = EXTRACT_PROMPT.format(text=text[:120_000])
-    content = complete_chat(prompt, temperature=0.0)  # temp=0 for consistency
+    content = ""
+    # Try with progressively smaller text if we hit token limits (413 errors)
+    for max_len in [120_000, 60_000, 30_000, 15_000, 8_000]:
+        prompt = EXTRACT_PROMPT.format(text=text[:max_len])
+        try:
+            content = complete_chat(prompt, temperature=0.0)  # temp=0 for consistency
+            break
+        except LLMTransportError as e:
+            if "413" in str(e) or "too large" in str(e).lower():
+                logger.warning("LLM request too large (max_len=%d). Trying again with shorter text...", max_len)
+                continue
+            raise
+    else:
+        # Fallback to extremely short block
+        prompt = EXTRACT_PROMPT.format(text=text[:3000])
+        content = complete_chat(prompt, temperature=0.0)
 
     # Primary: JSON parse
     try:
@@ -309,10 +323,14 @@ def run_extraction(paper_ids: list[int] | None = None) -> dict[str, Any]:
         q = session.query(Paper).filter(Paper.include_for_extraction.is_(True))
         if paper_ids:
             q = q.filter(Paper.id.in_(paper_ids))
-        papers = q.all()
-        logger.info("Starting extraction for %d papers", len(papers))
+        
+        target_pids = [row[0] for row in q.with_entities(Paper.id).all()]
+        logger.info("Starting extraction for %d papers", len(target_pids))
 
-        for p in papers:
+        for pid in target_pids:
+            p = session.query(Paper).get(pid)
+            if not p:
+                continue
             text = ""
 
             # 1. Try PDF first (richest source)
@@ -406,23 +424,22 @@ def run_extraction(paper_ids: list[int] | None = None) -> dict[str, Any]:
             ex.payload_json           = json.dumps(payload)
             ex.validation_flags_json  = json.dumps(flags)
 
-            session.flush()
+            session.commit()
             processed += 1
             time.sleep(1)  # rate limit
 
             logger.info(
                 "Extracted %d/%d — %s",
-                processed, len(papers), p.title[:60]
+                processed, len(target_pids), p.title[:60]
             )
 
-        session.commit()
         logger.info(
             "Extraction done: %d processed, %d with valid effect+CI",
             processed, success
         )
         return {
             "extracted":   processed,
-            "candidates":  len(papers),
+            "candidates":  len(target_pids),
             "with_effect": success,
             "missing":     processed - success,
         }

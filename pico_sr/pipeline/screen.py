@@ -110,12 +110,18 @@ def run_screening(
         q = session.query(Paper)
         if paper_ids:
             q = q.filter(Paper.id.in_(paper_ids))
-        papers = q.all()
+        
+        target_pids = [row[0] for row in q.with_entities(Paper.id).all()]
 
         screened = included = excluded = uncertain = 0
 
-        for p in papers:
-            if not p.title:
+        for pid in target_pids:
+            p = session.query(Paper).get(pid)
+            if not p or not p.title:
+                continue
+            
+            # Skip already screened papers if we are running a global batch
+            if p.screen_decision is not None and not paper_ids:
                 continue
 
             result = screen_one_paper(p.title, p.abstract, pico_criteria)
@@ -141,19 +147,20 @@ def run_screening(
 
             logger.info(
                 "Screened %d/%d — %s → %s (conf=%.2f, extract=%s)",
-                screened, len(papers),
+                screened, len(target_pids),
                 p.title[:60], _dec,
                 result["confidence"], extract,
             )
 
-        session.commit()
+            session.commit()
+
         logger.info(
             "Screening done: %d included, %d excluded, %d uncertain",
             included, excluded, uncertain
         )
         return {
             "screened": screened,
-            "total": len(papers),
+            "total": len(target_pids),
             "included": included,
             "excluded": excluded,
             "uncertain": uncertain,

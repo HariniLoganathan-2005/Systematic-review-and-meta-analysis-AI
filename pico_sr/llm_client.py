@@ -27,7 +27,7 @@ class LLMTransportError(RuntimeError):
 def complete_chat(
     user_prompt: str,
     temperature: float = 0.1,
-    max_retries: int = 3,
+    max_retries: int = 5,
     retry_delay: float = 2.0,
 ) -> str:
     """
@@ -54,12 +54,23 @@ def complete_chat(
             return result
 
         except LLMTransportError as e:
+            # If the request is physically too large, retrying the exact same string won't work
+            if "413" in e.message or "too large" in e.message.lower():
+                logger.error("LLM Request too large. Skipping retry.")
+                raise
+                
             if attempt < max_retries:
+                # Aggressively extend sleep for rate limits to allow bucket to reset (typically 60s)
+                if "rate limit" in e.message.lower() or "quota" in e.message.lower() or "429" in e.message:
+                    actual_delay = 20.0 * attempt
+                else:
+                    actual_delay = retry_delay * attempt
+                    
                 logger.warning(
                     "LLM attempt %d/%d failed: %s — retrying in %.1fs",
-                    attempt, max_retries, e.message, retry_delay
+                    attempt, max_retries, e.message, actual_delay
                 )
-                time.sleep(retry_delay * attempt)  # exponential backoff
+                time.sleep(actual_delay)
             else:
                 logger.error(
                     "LLM failed after %d attempts: %s", max_retries, e.message
@@ -161,6 +172,13 @@ def _complete_groq(user_prompt: str, temperature: float) -> str:
         return content
 
     except RateLimitError as e:
+        err_str = str(e).lower()
+        if "requested" in err_str and "limit" in err_str:
+            raise LLMTransportError(
+                f"Groq API error 413: Request too large. {str(e)[:200]}",
+                str(e),
+            ) from e
+            
         raise LLMTransportError(
             "Groq rate limit hit. Your extraction will retry automatically. "
             "Consider upgrading your Groq plan or reducing batch size.",
@@ -180,7 +198,19 @@ def _complete_groq(user_prompt: str, temperature: float) -> str:
                 "Check GROQ_API_KEY in your .env file.",
                 str(e),
             ) from e
+        elif e.status_code == 413 or (e.status_code == 400 and "too large" in str(e).lower()):
+            raise LLMTransportError(
+                f"Groq API error 413: Request too large. {str(e)[:200]}",
+                str(e),
+            ) from e
         elif e.status_code == 429:
+            err_str = str(e).lower()
+            if "requested" in err_str and "limit" in err_str:
+                raise LLMTransportError(
+                    f"Groq API error 413: Request too large. {str(e)[:200]}",
+                    str(e),
+                ) from e
+                
             raise LLMTransportError(
                 "Groq quota exceeded. Check your usage at console.groq.com",
                 str(e),

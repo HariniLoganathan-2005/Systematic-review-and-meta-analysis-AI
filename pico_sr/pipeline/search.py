@@ -524,14 +524,13 @@ def run_search(
                 pdf_path = pdf_path,
             )
             session.add(row)
-            session.flush()
+            session.commit()
             added += 1
             paper_ids.append(row.id)
 
             # Be polite to APIs
             time.sleep(0.5)
 
-        session.commit()
         total = session.query(Paper).count()
 
         logger.info(

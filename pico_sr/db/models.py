@@ -141,12 +141,24 @@ _engine = None
 _SessionLocal = None
 
 
+from sqlalchemy import event
+
 def get_engine(database_url: str | None = None):
     global _engine
     if _engine is None:
         from pico_sr.config import settings
         url = database_url or settings.sqlalchemy_url
-        _engine = create_engine(url, connect_args={"check_same_thread": False})
+        _engine = create_engine(url, connect_args={"check_same_thread": False, "timeout": 30})
+        
+        # Enable WAL mode for better concurrency, and increase typical wait times
+        if url.startswith("sqlite"):
+            @event.listens_for(_engine, "connect")
+            def set_sqlite_pragma(dbapi_connection, connection_record):
+                cursor = dbapi_connection.cursor()
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+                cursor.execute("PRAGMA busy_timeout=30000")
+                cursor.close()
     return _engine
 
 
